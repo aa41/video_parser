@@ -47,6 +47,8 @@ dev_dependencies:
   # rules and activating additional ones.
   #flutter_lints: ^2.0.0 //真正的代码不需要检查！！！
   webview_flutter: ^4.2.1
+  collection: ^1.16.0
+
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

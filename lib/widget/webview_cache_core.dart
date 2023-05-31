@@ -1,23 +1,23 @@
 import 'dart:async';
-import 'dart:collection';
-
 import 'package:flutter/material.dart';
+import 'package:video_parser/global.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:collection/collection.dart';
 
-import '../global.dart';
+const _kMaxTimeout = Duration(seconds: 60);
 
-const _kMaxTimeout = Duration(seconds: 30);
+const double _kDebugContainerHeight = 150.0;
 
 class CacheCoreList extends StatefulWidget {
   final Widget child;
 
   const CacheCoreList({Key? key, required this.child}) : super(key: key);
 
-  static CacheCoreListDelegate? of(BuildContext context) {
+  static CacheCoreDelegate? of(BuildContext context) {
     return context.findAncestorStateOfType<CacheCoreListState>();
   }
 
-  static CacheCoreListDelegate? ofRoot(BuildContext context) {
+  static CacheCoreDelegate? ofRoot(BuildContext context) {
     return context.findRootAncestorStateOfType<CacheCoreListState>();
   }
 
@@ -26,47 +26,126 @@ class CacheCoreList extends StatefulWidget {
 }
 
 class CacheCoreListState extends State<CacheCoreList>
-    implements CacheCoreListDelegate {
-  final List<WebViewCacheCore> cores = [];
-
+    with CacheCoreDelegate<CacheCoreList> {
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        ...cores,
-        widget.child,
-      ],
-    );
+    List<Widget> children = [];
+    Widget result;
+    if (!isDebug) {
+      children = _cores;
+      result = Stack(
+        children: [
+          ...children,
+          widget.child,
+        ],
+      );
+    } else {
+      children = _cores.mapIndexed((index, element) {
+        return Container(
+          width: _kDebugContainerHeight,
+          height: _kDebugContainerHeight,
+          child: element,
+        );
+      }).toList();
+      result = Column(
+        mainAxisSize: MainAxisSize.max,
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: _kDebugContainerHeight,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisSize: MainAxisSize.max,
+                mainAxisAlignment: MainAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: children,
+              ),
+            ),
+          ),
+          Expanded(child: widget.child),
+        ],
+      );
+    }
+
+    return result;
   }
 
   @override
   void dispose() {
-    cores.clear();
+    _cores.clear();
     super.dispose();
   }
-
-  @override
-  Future<void> addSingleCacheCore(String url,
-      {Function? onStart,
-      Function(int progress)? onProgress,
-      Function? onLoaded,
-      Function? onFailed}) async {}
 }
 
-abstract class CacheCoreListDelegate {
-  Future<void> addSingleCacheCore(String url,
-      {Function? onStart,
-      Function(int progress)? onProgress,
-      Function? onLoaded,
-      Function? onFailed});
+mixin CacheCoreDelegate<T extends StatefulWidget> on State<T> {
+  final List<WebViewCacheCore> _cores = [];
+
+  void addBackgroundHandle(String url,
+      {Function(CacheController controller)? onStart,
+      Function(int progress, CacheController controller)? onProgress,
+      Function(CacheController controller)? onLoaded,
+      Function(Object? error, CacheController controller)? onFailed}) {
+    dynamic _onInit = (CacheController controller) {};
+    dynamic _onFailed = (Object? error, CacheController controller) {
+      onFailed?.call(error, controller);
+      controller.removeSelf();
+    };
+    dynamic _onStart = (CacheController controller) {
+      try {
+        onStart?.call(controller);
+      } catch (e, stack) {
+        _onFailed.call(stack, controller);
+      }
+    };
+
+    dynamic _onProgress = (int progress, CacheController controller) {
+      try {
+        onProgress?.call(progress, controller);
+      } catch (e, stack) {
+        _onFailed.call(stack, controller);
+      }
+    };
+    dynamic _onLoaded = (CacheController controller) {
+      try {
+        onLoaded?.call(controller);
+      } catch (e, stack) {
+        _onFailed.call(stack, controller);
+      }
+    };
+
+    if (mounted) {
+      setState(() {
+        _cores.add(WebViewCacheCore(
+          url: url,
+          onStart: _onStart,
+          onProgress: _onProgress,
+          onLoaded: _onLoaded,
+          onFailed: _onFailed,
+          onInit: _onInit,
+        ));
+      });
+    }
+  }
+
+  Future<void> removeFromController(CacheController controller) async {
+    Future.microtask(() {
+      _cores.remove(controller.state.widget);
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
 }
 
-abstract class WebViewCacheCore extends StatefulWidget {
+class WebViewCacheCore extends StatefulWidget {
   final String url;
-  final Function? onStart;
-  final Function? onProgress;
-  final Function? onLoaded;
-  final Function? onFailed;
+  final Function(CacheController controller)? onStart;
+  final Function(int progress, CacheController controller)? onProgress;
+  final Function(CacheController controller)? onLoaded;
+  final Function(Object? error, CacheController controller)? onFailed;
+  final Function(CacheController controller)? onInit;
 
   const WebViewCacheCore(
       {Key? key,
@@ -74,7 +153,8 @@ abstract class WebViewCacheCore extends StatefulWidget {
       this.onStart,
       this.onProgress,
       this.onLoaded,
-      this.onFailed})
+      this.onFailed,
+      this.onInit})
       : super(key: key);
 
   static T? of<T extends CacheController>(BuildContext context) {
@@ -82,59 +162,77 @@ abstract class WebViewCacheCore extends StatefulWidget {
         .findAncestorStateOfType<_WebViewCacheCoreState>()
         ?.cacheController as T?;
   }
+
+  @override
+  State<StatefulWidget> createState() => _WebViewCacheCoreState();
 }
 
-abstract class _WebViewCacheCoreState extends State<WebViewCacheCore> {
+class _WebViewCacheCoreState extends State<WebViewCacheCore> {
   CacheController? cacheController;
-  bool isPageFinishCalled = false;
+  bool _isPageFinishCalled = false;
+  bool _isDisposed = false;
 
   @override
   void initState() {
     super.initState();
     _initController().then((value) {
-      cacheController = value;
-      setState(() {});
+      Future.microtask(() {
+        if (mounted) {
+          cacheController = value;
+          setState(() {});
+        }
+      });
     }).catchError((err, stack) {
-      debugPrint(stack);
+      debugPrint("$stack");
     });
   }
 
-  CacheController provideCacheController(WebViewController controller);
-
   Future<CacheController> _initController() async {
+    Completer<CacheController> completer = Completer();
     WebViewController _controller = WebViewController();
-    CacheController cacheController = provideCacheController(_controller);
+    CacheController cacheController = CacheController(_controller, this);
+    widget.onInit?.call(cacheController);
     await _controller.setJavaScriptMode(JavaScriptMode.unrestricted);
     await _controller.setBackgroundColor(const Color(0x00000000));
     await cacheController.injectCore();
     await _controller.setNavigationDelegate(
       NavigationDelegate(
         onProgress: (int progress) {
-          widget.onProgress?.call(progress);
+          widget.onProgress?.call(progress, cacheController);
+          if (progress == 100) {
+            if (!_isPageFinishCalled) {
+              _isPageFinishCalled = true;
+              widget.onLoaded?.call(cacheController);
+            }
+          }
         },
         onUrlChange: (UrlChange urlChange) {},
         onPageStarted: (String url) {
-          widget.onStart?.call();
+          widget.onStart?.call(cacheController);
         },
         onPageFinished: (String url) {
-          if (!isPageFinishCalled) {
-            isPageFinishCalled = true;
+          if (!_isPageFinishCalled) {
+            _isPageFinishCalled = true;
+            widget.onLoaded?.call(cacheController);
           }
-          widget.onLoaded?.call();
         },
         onWebResourceError: (WebResourceError error) {},
         onNavigationRequest: (NavigationRequest request) {
+          //should not jump to other http
           return NavigationDecision.prevent;
         },
       ),
     );
+    if (!completer.isCompleted) {
+      completer.complete(cacheController);
+    }
     await _controller.loadRequest(Uri.parse(widget.url));
     //超时 取消
     Future.delayed(_kMaxTimeout, () {
-      if (!mounted || isPageFinishCalled) return;
-      widget.onFailed?.call();
+      if (_isDisposed) return;
+      widget.onFailed?.call(ArgumentError("core timeout!!!"), cacheController);
     });
-    return cacheController;
+    return completer.future;
   }
 
   @override
@@ -147,15 +245,46 @@ abstract class _WebViewCacheCoreState extends State<WebViewCacheCore> {
 
   @override
   void dispose() {
+    _isDisposed = true;
+    cacheController?.dispose();
     super.dispose();
   }
 }
 
-abstract class CacheController {
+class CacheController {
   final WebViewController webViewController;
+  final State<WebViewCacheCore> state;
+  bool _isDisposed = false;
 
-  CacheController(this.webViewController);
+  CacheController(this.webViewController, this.state);
 
-  //todo 注入js
-  Future<void> injectCore();
+  bool get isDisposed => _isDisposed;
+
+  CacheCoreDelegate? findTargetCacheCore() {
+    if (isDisposed) return null;
+    return CacheCoreList.of(state.context);
+  }
+
+  void removeSelf() {
+    findTargetCacheCore()?.removeFromController(this);
+  }
+
+  Future<void> injectCore() async {
+    if (isDisposed) return;
+    Completer<void> completer = Completer();
+    try {
+      //  await webViewController.runJavaScript("");
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    } catch (e, stack) {
+      completer.completeError(e, stack);
+    }
+
+    return completer.future;
+  }
+
+  void dispose() {
+    _isDisposed = true;
+  }
 }
